@@ -589,20 +589,39 @@ def generate_city_heatmap(city_lat, city_lng, risk_level):
     return points
 
 
-def build_city_map(city_name, city_lat, city_lng, risk_level, radius_m):
-    # 지도 범위: 반경 기준 bounding box
+from branca.element import MacroElement
+from jinja2 import Template
+
+
+def _area_label_position(center_lat, center_lng, index, total, radius_m):
+    """구역 레이블을 원형으로 자동 배치"""
+    angle = (360 / max(total, 1)) * index - 90  # 북쪽(위)부터 시작
+    dist  = radius_m * 0.55
+    dlat  = dist * math.cos(math.radians(angle)) / 111000
+    dlng  = dist * math.sin(math.radians(angle)) / (111000 * math.cos(math.radians(center_lat)))
+    return center_lat + dlat, center_lng + dlng
+
+
+RISK_COLORS = {"매우 높음": "#CC0000", "높음": "#EF4444", "보통": "#F97316", "낮음": "#22C55E"}
+
+
+def build_city_map(city_name, city_lat, city_lng, risk_level, radius_m, areas=None):
+    areas = areas or []
     lat_d = (radius_m / 111000) * 2.2
     lng_d = (radius_m / (111000 * math.cos(math.radians(city_lat)))) * 2.2
 
+    # ── 타일: Carto Voyager (기존 Positron보다 컬러풀하고 현대적) ──
     m = folium.Map(
         location=[city_lat, city_lng],
         zoom_start=14,
-        tiles="CartoDB positron",
-        min_zoom=12,       # 세계지도 수준 줌아웃 방지
+        tiles="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> '
+             '&copy; <a href="https://carto.com/attributions">CARTO</a>',
+        min_zoom=12,
         max_zoom=18,
     )
 
-    # 히트맵
+    # ── 히트맵 ──────────────────────────────────────────────────────
     if city_name == "바르셀로나":
         random.seed(42)
         points = []
@@ -615,42 +634,109 @@ def build_city_map(city_name, city_lat, city_lng, risk_level, radius_m):
     else:
         points = generate_city_heatmap(city_lat, city_lng, risk_level)
 
-    HeatMap(points, radius=28, blur=22, max_zoom=18,
+    HeatMap(points, radius=30, blur=24, max_zoom=18,
             gradient={"0.2": "#22C55E", "0.45": "#FFC107",
                       "0.65": "#F97316", "0.82": "#EF4444", "1.0": "#CC0000"}).add_to(m)
 
-    # 반경 원
+    # ── 반경 원 ──────────────────────────────────────────────────────
+    radius_txt = f"반경 {radius_m // 1000}km" if radius_m >= 1000 else f"반경 {radius_m}m"
     folium.Circle(
         location=[city_lat, city_lng], radius=radius_m,
-        color="#1565C0", weight=2, fill=False, dash_array="8",
-        tooltip=f"반경 {radius_m // 1000}km" if radius_m >= 1000 else f"반경 {radius_m}m",
+        color="#1565C0", weight=2, fill=True, fill_color="#1565C0",
+        fill_opacity=0.04, dash_array="8", tooltip=radius_txt,
     ).add_to(m)
 
-    # 기준점 마커
+    # ── 기준점 마커 (팝업에 한국어) ───────────────────────────────────
+    badge_color = RISK_COLORS.get(risk_level, "#F97316")
+    popup_html  = (
+        f'<div style="font-family:sans-serif;min-width:160px;padding:4px;">'
+        f'<b style="font-size:14px;">📍 {city_name}</b><br>'
+        f'<span style="color:{badge_color};font-weight:bold;">'
+        f'전체 위험도: {risk_level}</span><br>'
+        f'<span style="color:#888;font-size:12px;">{radius_txt} 기준</span>'
+        f'</div>'
+    )
     folium.Marker(
         location=[city_lat, city_lng],
-        tooltip=f"📍 {city_name} 기준점",
+        tooltip=f"📍 {city_name} 기준점 — 위험도: {risk_level}",
+        popup=folium.Popup(popup_html, max_width=220),
         icon=folium.Icon(color="blue", icon="info-sign"),
     ).add_to(m)
 
-    # 구역 레이블 (바르셀로나는 정밀 좌표, 나머지는 자동 배치)
+    # ── 구역 레이블 ───────────────────────────────────────────────────
     if city_name == "바르셀로나":
-        labels = BARCELONA_LABELS
-    else:
-        # 주요 위험 구역을 중심 주변에 자동 배치
-        labels = {}
+        label_positions = BARCELONA_LABELS
+        for name, (lat, lng) in label_positions.items():
+            folium.Marker(
+                location=[lat, lng], tooltip=name,
+                icon=folium.DivIcon(
+                    html=(f'<div style="font-size:11px;color:#222;'
+                          f'background:rgba(255,255,255,0.9);'
+                          f'padding:3px 7px;border-radius:5px;'
+                          f'white-space:nowrap;font-weight:700;'
+                          f'box-shadow:0 1px 4px rgba(0,0,0,0.2);">{name}</div>'),
+                    icon_size=(120, 24), icon_anchor=(60, 12),
+                ),
+            ).add_to(m)
+    elif areas:
+        # 다른 CITY_DB 도시: 구역명을 원형으로 자동 배치
+        for i, (aname, alvl, acol, _) in enumerate(areas[:8]):
+            alat, alng = _area_label_position(city_lat, city_lng, i, len(areas), radius_m)
+            short = aname.split("(")[0].strip()  # 괄호 앞 한국어만
+            folium.Marker(
+                location=[alat, alng], tooltip=f"{short} — {alvl}",
+                icon=folium.DivIcon(
+                    html=(f'<div style="font-size:11px;color:#fff;'
+                          f'background:{acol};opacity:0.92;'
+                          f'padding:3px 7px;border-radius:5px;'
+                          f'white-space:nowrap;font-weight:700;'
+                          f'box-shadow:0 1px 4px rgba(0,0,0,0.25);">{short}</div>'),
+                    icon_size=(120, 24), icon_anchor=(60, 12),
+                ),
+            ).add_to(m)
 
-    for name, (lat, lng) in labels.items():
-        folium.Marker(
-            location=[lat, lng], tooltip=name,
-            icon=folium.DivIcon(
-                html=f'<div style="font-size:11px;color:#222;background:rgba(255,255,255,0.88);'
-                     f'padding:2px 6px;border-radius:4px;white-space:nowrap;font-weight:600;">{name}</div>',
-                icon_size=(110, 22), icon_anchor=(55, 11),
-            ),
-        ).add_to(m)
+    # ── 지도 내 한국어 범례 (Leaflet 컨트롤) ─────────────────────────
+    legend_macro = MacroElement()
+    legend_macro._template = Template(
+        "{% macro script(this, kwargs) %}\n"
+        "var legend = L.control({position: 'bottomleft'});\n"
+        "legend.onAdd = function(map) {\n"
+        "  var div = L.DomUtil.create('div');\n"
+        "  div.style.cssText = 'background:rgba(255,255,255,0.95);padding:10px 14px;"
+        "border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.2);"
+        "font-size:12px;line-height:2;pointer-events:none;';\n"
+        "  div.innerHTML = '<b style=\"font-size:13px;\">위험도 범례</b><br>'\n"
+        "    + '<span style=\"color:#CC0000;font-size:16px;\">●</span>&nbsp; 매우 높음<br>'\n"
+        "    + '<span style=\"color:#EF4444;font-size:16px;\">●</span>&nbsp; 높음<br>'\n"
+        "    + '<span style=\"color:#F97316;font-size:16px;\">●</span>&nbsp; 보통<br>'\n"
+        "    + '<span style=\"color:#22C55E;font-size:16px;\">●</span>&nbsp; 낮음';\n"
+        "  return div;\n"
+        "};\n"
+        "legend.addTo({{ this._parent.get_name() }});\n"
+        "{% endmacro %}"
+    )
+    legend_macro.add_to(m)
 
-    # 지도 뷰를 선택 도시로 고정
+    # ── 위험도 뱃지 (우측 상단) ──────────────────────────────────────
+    badge_macro = MacroElement()
+    badge_macro._template = Template(
+        "{% macro script(this, kwargs) %}\n"
+        "var badge = L.control({position: 'topright'});\n"
+        "badge.onAdd = function(map) {\n"
+        "  var div = L.DomUtil.create('div');\n"
+        f"  div.style.cssText = 'background:{badge_color};color:white;"
+        "padding:7px 14px;border-radius:8px;font-weight:bold;"
+        "font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,0.3);"
+        "pointer-events:none;';\n"
+        f"  div.innerHTML = '⚠&nbsp; {city_name} &nbsp;·&nbsp; {risk_level}';\n"
+        "  return div;\n"
+        "};\n"
+        "badge.addTo({{ this._parent.get_name() }});\n"
+        "{% endmacro %}"
+    )
+    badge_macro.add_to(m)
+
+    # ── 뷰 고정 ─────────────────────────────────────────────────────
     m.fit_bounds([
         [city_lat - lat_d, city_lng - lng_d],
         [city_lat + lat_d, city_lng + lng_d],
@@ -1065,7 +1151,8 @@ with tab_c:
     col_map, col_info = st.columns([3, 2])
 
     with col_map:
-        m = build_city_map(sel_city, city_lat, city_lng, risk_lvl, radius_m)
+        m = build_city_map(sel_city, city_lat, city_lng, risk_lvl, radius_m,
+                           areas=city_data.get("areas", []))
         st_folium(m, width=None, height=500, returned_objects=[])
 
     with col_info:
