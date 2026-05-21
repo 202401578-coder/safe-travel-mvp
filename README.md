@@ -25,19 +25,7 @@ cd safe-travel-mvp
 pip install -r requirements.txt
 ```
 
-### 3. API 키 설정
-
-`.streamlit/secrets.toml` 파일을 만들고 아래 내용 입력:
-
-```toml
-MOFA_API_KEY = "여기에_API_키_입력"
-```
-
-> API 키는 [공공데이터포털](https://www.data.go.kr)에서 아래 두 가지를 신청하면 발급됩니다 (자동승인):
-> - 외교부_국가·지역별 여행경보 (`TravelAlarmService2`)
-> - 외교부_여행경보제도 (`TravelWarningServiceV3`)
-
-### 4. 실행
+### 3. 실행
 
 ```bash
 streamlit run app.py
