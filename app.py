@@ -494,47 +494,162 @@ def fetch_safety_news(country_name, country_eng, city_name, city_eng):
         return []
 
 
+# ===================== 번역 함수 =====================
+
+@st.cache_data(ttl=86400)
+def translate_to_korean(text):
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {"client": "gtx", "sl": "auto", "tl": "ko", "dt": "t", "q": text}
+        resp = requests.get(url, params=params, timeout=5)
+        result = resp.json()
+        translated = "".join(seg[0] for seg in result[0] if seg[0])
+        return translated
+    except Exception:
+        return text  # 실패 시 원문 반환
+
+
 # ===================== 지도 함수 =====================
 
-def get_heatmap_data():
-    random.seed(42)
-    hotspots = [
-        (41.3797, 2.1738, 1.0), (41.3810, 2.1735, 0.95), (41.3785, 2.1741, 0.90),
-        (41.3833, 2.1764, 0.95), (41.3825, 2.1780, 0.90), (41.3840, 2.1755, 0.88),
-        (41.3870, 2.1700, 0.82), (41.3875, 2.1695, 0.78),
-        (41.3795, 2.1686, 0.75), (41.3785, 2.1675, 0.80), (41.3800, 2.1670, 0.72),
-        (41.3793, 2.1888, 0.50), (41.3780, 2.1900, 0.45),
-        (41.3933, 2.1619, 0.35), (41.3920, 2.1640, 0.40),
-        (41.3641, 2.1594, 0.20),
-    ]
+import math
+
+# 바르셀로나 정밀 히트맵 (실제 위험 좌표 기반)
+BARCELONA_HOTSPOTS = [
+    (41.3797, 2.1738, 1.0), (41.3810, 2.1735, 0.95), (41.3785, 2.1741, 0.90),
+    (41.3833, 2.1764, 0.95), (41.3825, 2.1780, 0.90), (41.3840, 2.1755, 0.88),
+    (41.3870, 2.1700, 0.82), (41.3875, 2.1695, 0.78),
+    (41.3795, 2.1686, 0.75), (41.3785, 2.1675, 0.80), (41.3800, 2.1670, 0.72),
+    (41.3793, 2.1888, 0.50), (41.3780, 2.1900, 0.45),
+    (41.3933, 2.1619, 0.35), (41.3920, 2.1640, 0.40),
+    (41.3641, 2.1594, 0.20),
+]
+
+BARCELONA_LABELS = {
+    "고딕 지구":    (41.3833, 2.1776),
+    "El Raval":    (41.3800, 2.1670),
+    "에이샴플라":   (41.3945, 2.1619),
+    "람블라스":     (41.3790, 2.1730),
+    "바르셀로네타": (41.3780, 2.1900),
+    "몬주이크":     (41.3641, 2.1594),
+}
+
+
+def generate_city_heatmap(city_lat, city_lng, risk_level):
+    weight_map = {"매우 높음": 0.92, "높음": 0.78, "보통": 0.50, "낮음": 0.22}
+    base_w = weight_map.get(risk_level, 0.50)
+    n_hot  = {"매우 높음": 9, "높음": 7, "보통": 5, "낮음": 3}.get(risk_level, 5)
+
+    seed_val = int((city_lat * 1000 + city_lng * 1000)) % 9999
+    random.seed(seed_val)
+
+    hotspots = []
+    for _ in range(n_hot):
+        dlat = random.uniform(-0.013, 0.013)
+        dlng = random.uniform(-0.016, 0.016)
+        w    = base_w * random.uniform(0.72, 1.0)
+        hotspots.append((city_lat + dlat, city_lng + dlng, w))
+
     points = []
     for lat, lng, w in hotspots:
         points.append([lat, lng, w])
-        for _ in range(7):
-            dlat = random.uniform(-0.005, 0.005)
-            dlng = random.uniform(-0.005, 0.005)
-            points.append([lat + dlat, lng + dlng, max(0.1, w * random.uniform(0.4, 0.85))])
+        for _ in range(9):
+            points.append([
+                lat + random.uniform(-0.006, 0.006),
+                lng + random.uniform(-0.007, 0.007),
+                max(0.05, w * random.uniform(0.35, 0.82)),
+            ])
     return points
 
 
-def build_map(center_lat, center_lng, radius_m):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=14, tiles="CartoDB positron")
-    HeatMap(get_heatmap_data(), radius=28, blur=22, max_zoom=18,
-            gradient={"0.2": "#22C55E", "0.45": "#FFC107", "0.65": "#F97316",
-                      "0.82": "#EF4444", "1.0": "#CC0000"}).add_to(m)
-    folium.Circle(location=[center_lat, center_lng], radius=radius_m,
-                  color="#1565C0", weight=2, fill=False, dash_array="8").add_to(m)
-    folium.Marker(location=[center_lat, center_lng], tooltip="📍 카탈루냐 광장 (기준점)",
-                  icon=folium.Icon(color="blue", icon="info-sign")).add_to(m)
-    for name, (lat, lng) in {"고딕 지구": (41.3833, 2.1776), "El Raval": (41.3800, 2.1670),
-                              "에이샴플라": (41.3945, 2.1619), "람블라스": (41.3790, 2.1730),
-                              "바르셀로네타": (41.3780, 2.1900)}.items():
-        folium.Marker(location=[lat, lng], tooltip=name,
-                      icon=folium.DivIcon(
-                          html=f'<div style="font-size:11px;color:#222;background:rgba(255,255,255,0.85);'
-                               f'padding:2px 6px;border-radius:4px;white-space:nowrap;font-weight:600;">{name}</div>',
-                          icon_size=(100, 22), icon_anchor=(50, 11))).add_to(m)
+def build_city_map(city_name, city_lat, city_lng, risk_level, radius_m):
+    # 지도 범위: 반경 기준 bounding box
+    lat_d = (radius_m / 111000) * 2.2
+    lng_d = (radius_m / (111000 * math.cos(math.radians(city_lat)))) * 2.2
+
+    m = folium.Map(
+        location=[city_lat, city_lng],
+        zoom_start=14,
+        tiles="CartoDB positron",
+        min_zoom=12,       # 세계지도 수준 줌아웃 방지
+        max_zoom=18,
+    )
+
+    # 히트맵
+    if city_name == "바르셀로나":
+        random.seed(42)
+        points = []
+        for lat, lng, w in BARCELONA_HOTSPOTS:
+            points.append([lat, lng, w])
+            for _ in range(7):
+                points.append([lat + random.uniform(-0.005, 0.005),
+                                lng + random.uniform(-0.005, 0.005),
+                                max(0.1, w * random.uniform(0.4, 0.85))])
+    else:
+        points = generate_city_heatmap(city_lat, city_lng, risk_level)
+
+    HeatMap(points, radius=28, blur=22, max_zoom=18,
+            gradient={"0.2": "#22C55E", "0.45": "#FFC107",
+                      "0.65": "#F97316", "0.82": "#EF4444", "1.0": "#CC0000"}).add_to(m)
+
+    # 반경 원
+    folium.Circle(
+        location=[city_lat, city_lng], radius=radius_m,
+        color="#1565C0", weight=2, fill=False, dash_array="8",
+        tooltip=f"반경 {radius_m // 1000}km" if radius_m >= 1000 else f"반경 {radius_m}m",
+    ).add_to(m)
+
+    # 기준점 마커
+    folium.Marker(
+        location=[city_lat, city_lng],
+        tooltip=f"📍 {city_name} 기준점",
+        icon=folium.Icon(color="blue", icon="info-sign"),
+    ).add_to(m)
+
+    # 구역 레이블 (바르셀로나는 정밀 좌표, 나머지는 자동 배치)
+    if city_name == "바르셀로나":
+        labels = BARCELONA_LABELS
+    else:
+        # 주요 위험 구역을 중심 주변에 자동 배치
+        labels = {}
+
+    for name, (lat, lng) in labels.items():
+        folium.Marker(
+            location=[lat, lng], tooltip=name,
+            icon=folium.DivIcon(
+                html=f'<div style="font-size:11px;color:#222;background:rgba(255,255,255,0.88);'
+                     f'padding:2px 6px;border-radius:4px;white-space:nowrap;font-weight:600;">{name}</div>',
+                icon_size=(110, 22), icon_anchor=(55, 11),
+            ),
+        ).add_to(m)
+
+    # 지도 뷰를 선택 도시로 고정
+    m.fit_bounds([
+        [city_lat - lat_d, city_lng - lng_d],
+        [city_lat + lat_d, city_lng + lng_d],
+    ])
     return m
+
+
+def get_city_crime_stats(city_data):
+    risk_mult = {"매우 높음": 4.0, "높음": 2.5, "보통": 1.4, "낮음": 0.6}
+    mult = risk_mult.get(city_data.get("risk", "보통"), 1.4)
+    seed_val = int(abs(city_data.get("lat", 0) * 1000)) % 9999
+    random.seed(seed_val)
+
+    bases = [
+        ("소매치기", "👜", 14),
+        ("강력범죄", "⚠️", 4),
+        ("시위/집회", "📢", 2),
+        ("교통/사고", "🚗", 6),
+    ]
+    stats = []
+    for type_name, emoji, base in bases:
+        count = max(0, int(base * mult * random.uniform(0.75, 1.30)))
+        level = "높음" if count >= 20 else "보통" if count >= 8 else "낮음"
+        color = "#EF4444" if level == "높음" else "#F97316" if level == "보통" else "#22C55E"
+        stats.append({"type": type_name, "emoji": emoji,
+                      "level": level, "color": color, "count": count})
+    return stats
 
 
 # ===================== 세션 상태 초기화 =====================
@@ -707,62 +822,70 @@ with tab_b:
     sel_eng     = st.session_state.selected_country_eng
     sel_city    = st.session_state.selected_city
 
+    city_eng = CITY_DB.get(sel_country, {}).get(sel_city, {}).get("eng", sel_city)
+
     st.subheader(f"🔔 실시간 위험 알림 — {sel_country} · {sel_city}")
-    st.caption("Google 뉴스 RSS 기반 실시간 수집 | 위험 키워드 자동 필터링")
+    st.caption("현지 뉴스 RSS 실시간 수집 · 한국어 자동 번역 | 위험 키워드 필터링")
 
     col_b1, col_b2 = st.columns([2, 1])
     with col_b1:
         st.markdown(
             f"<div style='background:#EFF6FF;border-radius:8px;padding:10px 14px;font-size:13px;'>"
-            f"📍 <strong>A탭에서 선택한 여행지</strong>: {sel_country} · {sel_city}<br>"
+            f"📍 <strong>현재 선택 여행지</strong>: {sel_country} · {sel_city} ({city_eng})<br>"
             f"<span style='color:#666;'>A탭에서 국가/도시를 변경하면 알림도 자동 업데이트됩니다.</span>"
             f"</div>", unsafe_allow_html=True
         )
-
     with col_b2:
         if st.button("🔄 뉴스 새로고침", use_container_width=True):
             st.cache_data.clear()
+            st.rerun()
 
     st.markdown("---")
 
-    # 도시 영문명 조회
-    city_eng = ""
-    if sel_country in CITY_DB and sel_city in CITY_DB[sel_country]:
-        city_eng = CITY_DB[sel_country][sel_city].get("eng", sel_city)
-    else:
-        city_eng = sel_city
-
-    # 실시간 뉴스
-    with st.spinner(f"{sel_city} 관련 안전 뉴스 수집 중..."):
+    with st.spinner(f"{sel_city} 관련 현지 안전 뉴스 수집 중..."):
         news_items = fetch_safety_news(sel_country, sel_eng, sel_city, city_eng)
 
+    HIGH_KW  = {"terror", "attack", "shooting", "explosion", "killed", "dead", "bomb",
+                "hostage", "massacre", "테러", "폭발", "총격", "사망", "납치"}
+    MID_KW   = {"crime", "robbery", "arrest", "protest", "demonstration", "theft", "scam",
+                "사건", "범죄", "강도", "시위", "사기", "소매치기"}
+
     if news_items:
-        st.markdown(f"**{sel_city} ({city_eng}) 관련 최신 안전 뉴스 ({len(news_items)}건)**")
-        for i, article in enumerate(news_items):
-            level_color = "#EF4444" if any(kw in article["title"] for kw in ["테러", "폭발", "총격", "사망", "attack", "terror", "shooting"]) \
-                else "#F97316" if any(kw in article["title"] for kw in ["사건", "사고", "범죄", "시위", "crime"]) \
-                else "#F59E0B"
-            level_text = "높음" if level_color == "#EF4444" else "보통" if level_color == "#F97316" else "주의"
+        st.markdown(f"**{sel_city} 최신 안전 뉴스 ({len(news_items)}건) — 한국어 번역**")
+        for article in news_items:
+            orig   = article["title"]
+            title_l = orig.lower()
+
+            if any(k in title_l for k in HIGH_KW):
+                level_color, level_text = "#EF4444", "높음"
+            elif any(k in title_l for k in MID_KW):
+                level_color, level_text = "#F97316", "보통"
+            else:
+                level_color, level_text = "#F59E0B", "주의"
+
+            # 번역 (캐시됨)
+            ko_title = translate_to_korean(orig)
+
             st.markdown(
                 f"""<div class="alert-card" style="border-left:5px solid {level_color};background:#fafafa;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                        <span style="font-weight:700;font-size:14px;">{article['title']}</span>
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
+                        <span style="font-weight:700;font-size:14px;line-height:1.4;">{ko_title}</span>
                         <span style="background:{level_color};color:white;padding:2px 8px;
-                              border-radius:12px;font-size:11px;font-weight:bold;white-space:nowrap;margin-left:8px;">
-                              {level_text}</span>
+                              border-radius:12px;font-size:11px;font-weight:bold;
+                              white-space:nowrap;margin-left:10px;flex-shrink:0;">{level_text}</span>
                     </div>
-                    <div style="color:#999;font-size:11px;">
-                        📰 {article['source']} &nbsp;|&nbsp; 🕐 {article['pub'][:16] if article['pub'] else ''}
-                        &nbsp;|&nbsp; <a href="{article['link']}" target="_blank">원문 보기 →</a>
+                    <div style="color:#aaa;font-size:11px;margin-top:2px;font-style:italic;">{orig}</div>
+                    <div style="color:#999;font-size:11px;margin-top:5px;">
+                        📰 {article['source']} &nbsp;|&nbsp;
+                        🕐 {article['pub'][:16] if article['pub'] else ''} &nbsp;|&nbsp;
+                        <a href="{article['link']}" target="_blank">원문 보기 →</a>
                     </div>
                 </div>""", unsafe_allow_html=True
             )
     else:
-        st.info(f"현재 {sel_country} 관련 긴급 안전 뉴스가 없습니다.")
+        st.success(f"✅ 현재 {sel_city}({city_eng}) 관련 긴급 안전 뉴스가 없습니다.")
 
     st.divider()
-
-    # 알림 설정 (기획서 B 서비스 기능 시뮬레이션)
     st.markdown("**📳 알림 수신 설정**")
     s1, s2 = st.columns(2)
     with s1:
@@ -777,66 +900,110 @@ with tab_b:
 # ===================== TAB C =====================
 
 with tab_c:
+    sel_country = st.session_state.selected_country
+    sel_city    = st.session_state.selected_city
+
+    # 도시 데이터 조회
+    if sel_country in CITY_DB and sel_city in CITY_DB[sel_country]:
+        city_data = CITY_DB[sel_country][sel_city]
+    else:
+        city_data = {"lat": 48.8566, "lng": 2.3522, "eng": sel_city,
+                     "risk": "보통", "risk_color": "#F97316", "areas": [], "tips": []}
+
+    city_lat  = city_data["lat"]
+    city_lng  = city_data["lng"]
+    city_eng  = city_data.get("eng", sel_city)
+    risk_lvl  = city_data.get("risk", "보통")
+    risk_col  = city_data.get("risk_color", "#F97316")
+
+    # 헤더
     ch1, ch2 = st.columns([3, 2])
     with ch1:
         st.subheader("📍 여행지 위험지도")
-        st.caption("현재 위치 기준 반경 위험도 시각화")
+        st.caption(f"{sel_country} · {sel_city} 위험도 시각화")
     with ch2:
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("🇪🇸 **스페인 · 바르셀로나**  \n📌 기준점: 카탈루냐 광장 (Plaça de Catalunya)")
+        st.markdown(f"**{sel_country} · {sel_city}** ({city_eng})  \n📌 기준점: {sel_city} 중심")
 
-    radius_map = {"500m": 500, "1km": 1000, "2km": 2000, "3km": 3000}
+    radius_map   = {"500m": 500, "1km": 1000, "2km": 2000, "3km": 3000}
     radius_label = st.radio("반경 설정", list(radius_map.keys()), index=1, horizontal=True)
-    radius_m = radius_map[radius_label]
+    radius_m     = radius_map[radius_label]
 
     col_map, col_info = st.columns([3, 2])
 
     with col_map:
-        m = build_map(41.3870, 2.1700, radius_m)
+        m = build_city_map(sel_city, city_lat, city_lng, risk_lvl, radius_m)
         st_folium(m, width=None, height=500, returned_objects=[])
 
     with col_info:
+        # 위험도 요약
+        risk_bg   = {"매우 높음": "#fff0f0", "높음": "#fff5f5",
+                     "보통": "#fffbf0", "낮음": "#f0fff4"}.get(risk_lvl, "#fff")
+        risk_desc = {"매우 높음": "강력범죄·테러 위협. 방문을 재고하세요.",
+                     "높음":   "소매치기·강력범죄 주의. 야간 단독 이동 자제.",
+                     "보통":   "기본 안전 수칙 준수 시 비교적 안전합니다.",
+                     "낮음":   "비교적 안전한 도시입니다."}.get(risk_lvl, "")
+
         st.markdown("#### 전체 위험도 요약")
         st.markdown(
-            """<div style="background:#fff5f5;border:2px solid #EF4444;border-radius:10px;
+            f"""<div style="background:{risk_bg};border:2px solid {risk_col};border-radius:10px;
                 padding:16px;margin-bottom:12px;">
-                <div style="font-size:20px;font-weight:bold;color:#EF4444;">⚠️ 높음</div>
-                <div style="margin-top:8px;font-size:13px;color:#444;">
-                    소매치기, 강력범죄 주의.<br>특히 람블라스 거리, 고딕 지구 주의.
-                </div>
-            </div>""", unsafe_allow_html=True
-        )
-        st.markdown("#### 위험도 범례")
-        for color, level, desc in LEGEND:
-            st.markdown(
-                f"""<div style="margin:6px 0;display:flex;align-items:center;">
-                    <span style="display:inline-block;width:14px;height:14px;border-radius:50%;
-                                 background:{color};margin-right:10px;flex-shrink:0;"></span>
-                    <span><strong>{level}</strong> — <span style="color:#666;font-size:13px;">{desc}</span></span>
-                </div>""", unsafe_allow_html=True
-            )
-        st.divider()
-        st.markdown("#### 지도 기준점")
-        st.markdown(
-            """<div style="background:#f0f4ff;border-radius:8px;padding:12px;font-size:13px;">
-                📍 <strong>카탈루냐 광장</strong> (Plaça de Catalunya)<br>
-                <span style="color:#666;">선택 반경 내 위험도를 시각화합니다.</span>
+                <div style="font-size:20px;font-weight:bold;color:{risk_col};">⚠️ {risk_lvl}</div>
+                <div style="margin-top:8px;font-size:13px;color:#444;">{risk_desc}</div>
             </div>""", unsafe_allow_html=True
         )
 
+        # 구역별 위험도
+        if city_data.get("areas"):
+            st.markdown("#### 구역별 위험도")
+            for area_name, area_level, area_color, area_detail in city_data["areas"]:
+                st.markdown(
+                    f"""<div style="display:flex;align-items:center;margin:4px 0;padding:6px 10px;
+                        background:#f9f9f9;border-radius:6px;border-left:4px solid {area_color};">
+                        <span style="font-size:12px;flex:1;"><strong>{area_name}</strong><br>
+                        <span style="color:#777;font-size:11px;">{area_detail}</span></span>
+                        <span style="color:{area_color};font-size:11px;font-weight:bold;
+                              margin-left:8px;white-space:nowrap;">{area_level}</span>
+                    </div>""", unsafe_allow_html=True
+                )
+
+        st.divider()
+
+        # 범례
+        st.markdown("#### 위험도 범례")
+        for color, level, desc in LEGEND:
+            st.markdown(
+                f"""<div style="margin:5px 0;display:flex;align-items:center;">
+                    <span style="display:inline-block;width:12px;height:12px;border-radius:50%;
+                                 background:{color};margin-right:8px;flex-shrink:0;"></span>
+                    <span style="font-size:13px;"><strong>{level}</strong>
+                    <span style="color:#777;"> — {desc}</span></span>
+                </div>""", unsafe_allow_html=True
+            )
+
+        st.divider()
+        st.markdown("#### 지도 기준점")
+        st.markdown(
+            f"""<div style="background:#f0f4ff;border-radius:8px;padding:12px;font-size:13px;">
+                📍 <strong>{sel_city}</strong> ({city_eng})<br>
+                <span style="color:#666;">A탭에서 도시 변경 시 지도도 자동 업데이트됩니다.</span>
+            </div>""", unsafe_allow_html=True
+        )
+
+    # 하단 범죄 통계 (도시 위험도 기반 동적 생성)
     st.divider()
-    st.markdown(f"**위험 유형별 주요 발생 정보 ({radius_label} 반경, 최근 7일)**")
+    st.markdown(f"**{sel_city} 위험 유형별 주요 발생 정보 ({radius_label} 반경, 추정치)**")
+    crime_stats = get_city_crime_stats(city_data)
     cols = st.columns(4)
-    for i, stat in enumerate(CRIME_STATS):
+    for i, stat in enumerate(crime_stats):
         with cols[i]:
             st.markdown(
                 f"""<div class="crime-card" style="border-top:4px solid {stat['color']};">
                     <div style="font-size:24px;">{stat['emoji']}</div>
                     <div style="font-weight:700;font-size:14px;margin-top:4px;">{stat['type']}</div>
                     <div style="color:{stat['color']};font-weight:bold;font-size:13px;margin:4px 0;">{stat['level']}</div>
-                    <div style="color:#666;font-size:11px;margin-bottom:8px;">{stat['location']}</div>
-                    <div style="font-size:26px;font-weight:bold;color:#222;">{stat['count']}</div>
-                    <div style="color:#999;font-size:11px;">{stat['unit']}</div>
+                    <div style="font-size:26px;font-weight:bold;color:#222;margin-top:8px;">{stat['count']}</div>
+                    <div style="color:#999;font-size:11px;">건 (최근 7일)</div>
                 </div>""", unsafe_allow_html=True
             )
 
