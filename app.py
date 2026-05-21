@@ -433,6 +433,34 @@ def fetch_all_countries():
         return {}
 
 
+@st.cache_data(ttl=86400)
+def geocode_city(city_query, country_eng=""):
+    """Nominatim(OSM)으로 도시 좌표 검색 — 무료, API 키 불필요"""
+    try:
+        q = f"{city_query}, {country_eng}" if country_eng else city_query
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": q, "format": "json", "limit": 1, "addressdetails": 1},
+            headers={"User-Agent": "SafeTravel-MVP/1.0"},
+            timeout=8,
+        )
+        results = resp.json()
+        if results:
+            r = results[0]
+            return {
+                "lat":         float(r["lat"]),
+                "lng":         float(r["lon"]),
+                "display":     r.get("display_name", city_query),
+                "city_eng":    r.get("address", {}).get("city")
+                               or r.get("address", {}).get("town")
+                               or r.get("address", {}).get("county")
+                               or city_query,
+            }
+        return None
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=3600)
 def fetch_warning_detail(country_name):
     try:
@@ -660,6 +688,20 @@ if "selected_country_eng" not in st.session_state:
     st.session_state.selected_country_eng = "Spain"
 if "selected_city" not in st.session_state:
     st.session_state.selected_city = "바르셀로나"
+if "city_lat" not in st.session_state:
+    st.session_state.city_lat = 41.3870
+if "city_lng" not in st.session_state:
+    st.session_state.city_lng = 2.1700
+if "city_eng" not in st.session_state:
+    st.session_state.city_eng = "Barcelona"
+if "city_risk" not in st.session_state:
+    st.session_state.city_risk = "높음"
+if "city_risk_color" not in st.session_state:
+    st.session_state.city_risk_color = "#EF4444"
+if "city_areas" not in st.session_state:
+    st.session_state.city_areas = []
+if "city_tips" not in st.session_state:
+    st.session_state.city_tips = []
 
 # ===================== 헤더 =====================
 
@@ -775,45 +817,135 @@ with tab_a:
     # --- ② 도시 선택 ---
     st.subheader("② 도시 선택")
 
-    if country in CITY_DB:
-        city_list = list(CITY_DB[country].keys())
-        city = st.selectbox("도시", city_list, label_visibility="collapsed")
-        st.session_state.selected_city = city
-        cinfo = CITY_DB[country][city]
+    # 국가 경보 기반 기본 위험도 (도시 DB 없을 때 폴백)
+    country_risk_map = {"1": ("낮음",   "#22C55E"),
+                        "2": ("보통",   "#F97316"),
+                        "3": ("높음",   "#EF4444"),
+                        "4": ("매우 높음", "#CC0000")}
+    fallback_risk, fallback_color = country_risk_map.get(info["level"], ("보통", "#F97316"))
 
-        with st.expander(
-            f"⚠️ {city} ({cinfo['eng']}) 안전 브리핑 — 전체 위험도: **{cinfo['risk']}**",
-            expanded=True
-        ):
-            st.markdown(
-                f"<span style='font-size:18px;font-weight:bold;color:{cinfo['risk_color']};'>"
-                f"전체 위험도: {cinfo['risk']}</span>",
-                unsafe_allow_html=True
-            )
-            st.markdown("---")
+    db_cities   = list(CITY_DB.get(country, {}).keys())
+    has_db      = bool(db_cities)
 
-            # 구역별 위험 수준
-            if cinfo.get("areas"):
-                st.markdown("**구역별 위험 수준**")
-                for area_name, area_level, area_color, area_detail in cinfo["areas"]:
-                    c1, c2, c3 = st.columns([3, 2, 4])
-                    c1.markdown(f"**{area_name}**")
-                    c2.markdown(
-                        f"<span style='color:{area_color};font-weight:bold;'>{area_level}</span>",
-                        unsafe_allow_html=True
-                    )
-                    c3.markdown(area_detail)
+    # 드롭다운(DB 도시) + 직접입력 병렬 제공
+    col_sel, col_txt = st.columns([1, 1])
 
-            st.markdown("---")
-            st.markdown("**여행 시 주의사항**")
-            for tip in cinfo.get("tips", []):
-                st.info(tip)
+    with col_sel:
+        if has_db:
+            options = db_cities + ["✏️ 직접 입력"]
+            chosen = st.selectbox("DB 도시 선택", options, label_visibility="visible")
+        else:
+            chosen = "✏️ 직접 입력"
+            st.caption("해당 국가는 상세 DB 미보유 — 직접 입력으로 검색")
 
+    with col_txt:
+        custom_input = st.text_input(
+            "도시 직접 입력 (한글·영어 모두 가능)",
+            placeholder="예: 빌바오, Bilbao, Cairo",
+            label_visibility="visible",
+        )
+
+    # 최종 도시 결정
+    if custom_input.strip():
+        # 직접 입력 우선
+        city_query = custom_input.strip()
+        use_db     = False
+    elif chosen != "✏️ 직접 입력":
+        city_query = chosen
+        use_db     = True
     else:
-        city_input = st.text_input("방문 예정 도시 입력 (직접 입력)", placeholder="예: 카이로, Cairo")
-        if city_input:
-            st.session_state.selected_city = city_input
-        st.info("ℹ️ 해당 국가의 도시별 상세 정보는 준비 중입니다. 외교부 공식 위험지도를 참고해주세요.")
+        city_query = ""
+        use_db     = False
+
+    if city_query:
+        st.session_state.selected_city = city_query
+
+        if use_db and city_query in CITY_DB.get(country, {}):
+            # ── DB 보유 도시 ──────────────────────────────────────────
+            cinfo = CITY_DB[country][city_query]
+            st.session_state.city_lat        = cinfo["lat"]
+            st.session_state.city_lng        = cinfo["lng"]
+            st.session_state.city_eng        = cinfo.get("eng", city_query)
+            st.session_state.city_risk       = cinfo["risk"]
+            st.session_state.city_risk_color = cinfo["risk_color"]
+            st.session_state.city_areas      = cinfo.get("areas", [])
+            st.session_state.city_tips       = cinfo.get("tips", [])
+
+            with st.expander(
+                f"⚠️ {city_query} ({cinfo['eng']}) 안전 브리핑 — 위험도: **{cinfo['risk']}**",
+                expanded=True,
+            ):
+                st.markdown(
+                    f"<span style='font-size:18px;font-weight:bold;color:{cinfo['risk_color']};'>"
+                    f"전체 위험도: {cinfo['risk']}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown("---")
+                if cinfo.get("areas"):
+                    st.markdown("**구역별 위험 수준**")
+                    for aname, alvl, acol, adet in cinfo["areas"]:
+                        c1, c2, c3 = st.columns([3, 2, 4])
+                        c1.markdown(f"**{aname}**")
+                        c2.markdown(
+                            f"<span style='color:{acol};font-weight:bold;'>{alvl}</span>",
+                            unsafe_allow_html=True,
+                        )
+                        c3.markdown(adet)
+                st.markdown("---")
+                st.markdown("**여행 시 주의사항**")
+                for tip in cinfo.get("tips", []):
+                    st.info(tip)
+
+        else:
+            # ── Nominatim 지오코딩 ────────────────────────────────────
+            with st.spinner(f"'{city_query}' 위치 검색 중 (OpenStreetMap)..."):
+                geo = geocode_city(city_query, all_countries[country]["eng_name"])
+
+            if geo:
+                st.session_state.city_lat        = geo["lat"]
+                st.session_state.city_lng        = geo["lng"]
+                st.session_state.city_eng        = geo["city_eng"]
+                st.session_state.city_risk       = fallback_risk
+                st.session_state.city_risk_color = fallback_color
+                st.session_state.city_areas      = []
+                st.session_state.city_tips       = []
+
+                st.success(f"📍 위치 확인: {geo['display'].split(',')[0]} "
+                           f"(위도 {geo['lat']:.4f}, 경도 {geo['lng']:.4f})")
+
+                # 국가 경보 기반 안내
+                with st.expander(
+                    f"⚠️ {city_query} 안전 브리핑 — 위험도: **{fallback_risk}** (국가 경보 기반)",
+                    expanded=True,
+                ):
+                    st.markdown(
+                        f"<span style='font-size:18px;font-weight:bold;color:{fallback_color};'>"
+                        f"전체 위험도: {fallback_risk}</span>  "
+                        f"<span style='color:#888;font-size:13px;'>(외교부 {country} 경보 {info['level']}단계 기반)</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("---")
+                    st.markdown("**도시별 상세 데이터 미보유 — 국가 수준 안전 정보 적용**")
+                    lvl_tips = {
+                        "1": ["✅ 여행 유의 수준입니다. 기본 안전 수칙을 지키세요.",
+                              "📱 귀중품 관리에 주의하세요.",
+                              "🏥 여행자 보험 가입을 권장합니다."],
+                        "2": ["⚠️ 여행 자제 국가입니다. 꼭 필요한 경우에만 방문하세요.",
+                              "🚨 신변 안전에 항상 주의하세요.",
+                              "📞 현지 대사관 연락처를 저장하세요.",
+                              "🏥 여행자 보험 필수 가입"],
+                        "3": ["🔴 출국 권고 국가입니다. 즉시 출국을 검토하세요.",
+                              "🚨 한국 대사관에 즉시 연락하세요.",
+                              "📻 현지 긴급 방송에 귀를 기울이세요."],
+                        "4": ["🚫 여행 금지 국가입니다. 방문을 중단하고 즉시 출국하세요.",
+                              "🚨 영사콜센터 (+82-2-3210-0404) 즉시 연락"],
+                    }
+                    for tip in lvl_tips.get(info["level"], []):
+                        st.info(tip)
+            else:
+                st.warning(f"'{city_query}' 위치를 찾을 수 없습니다. 영어 도시명으로 다시 시도해보세요.")
+    else:
+        st.caption("위에서 도시를 선택하거나 직접 입력하면 상세 정보가 표시됩니다.")
 
 # ===================== TAB B =====================
 
@@ -903,18 +1035,19 @@ with tab_c:
     sel_country = st.session_state.selected_country
     sel_city    = st.session_state.selected_city
 
-    # 도시 데이터 조회
-    if sel_country in CITY_DB and sel_city in CITY_DB[sel_country]:
-        city_data = CITY_DB[sel_country][sel_city]
-    else:
-        city_data = {"lat": 48.8566, "lng": 2.3522, "eng": sel_city,
-                     "risk": "보통", "risk_color": "#F97316", "areas": [], "tips": []}
+    # 세션 상태에서 바로 읽기 (A탭 선택 결과)
+    city_lat = st.session_state.city_lat
+    city_lng = st.session_state.city_lng
+    city_eng = st.session_state.city_eng
+    risk_lvl = st.session_state.city_risk
+    risk_col = st.session_state.city_risk_color
 
-    city_lat  = city_data["lat"]
-    city_lng  = city_data["lng"]
-    city_eng  = city_data.get("eng", sel_city)
-    risk_lvl  = city_data.get("risk", "보통")
-    risk_col  = city_data.get("risk_color", "#F97316")
+    city_data = {
+        "lat": city_lat, "lng": city_lng, "eng": city_eng,
+        "risk": risk_lvl, "risk_color": risk_col,
+        "areas": st.session_state.city_areas,
+        "tips":  st.session_state.city_tips,
+    }
 
     # 헤더
     ch1, ch2 = st.columns([3, 2])
