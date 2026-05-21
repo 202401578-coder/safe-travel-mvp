@@ -3,6 +3,7 @@ import folium
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
 import random
+import requests
 
 st.set_page_config(
     page_title="안전여행",
@@ -37,22 +38,68 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ===================== 샘플 데이터 =====================
+# ===================== 외교부 API =====================
 
-COUNTRY_INFO = {
-    "스페인 🇪🇸": {
-        "level": 1,
-        "level_text": "여행 유의",
-        "level_color": "orange",
-        "risks": [
-            "관광지 밀집 구역 소매치기 빈번",
-            "카탈루냐 지역 정치적 시위 간헐적 발생",
-            "일부 도심 지역 야간 치안 취약",
-        ],
-        "recommend": True,
-        "cities": ["바르셀로나", "마드리드", "세비야", "발렌시아"],
-    }
+API_KEY = "4a8c9a2a154141a85edbb284e8604e2b650d9697c0806cc5610ff1515d0c9297"
+API_URL = "https://apis.data.go.kr/1262000/TravelAlarmService2/getTravelAlarmList2"
+
+ALARM_LEVEL_INFO = {
+    "1": {"text": "여행 유의",  "color": "#FFC107", "bg": "#FFFDE7", "icon": "🟡"},
+    "2": {"text": "여행 자제",  "color": "#FF9800", "bg": "#FFF3E0", "icon": "🟠"},
+    "3": {"text": "출국 권고",  "color": "#F44336", "bg": "#FFEBEE", "icon": "🔴"},
+    "4": {"text": "여행 금지",  "color": "#7B1FA2", "bg": "#F3E5F5", "icon": "🚫"},
 }
+
+@st.cache_data(ttl=3600)
+def fetch_all_countries():
+    try:
+        resp = requests.get(API_URL, params={
+            "serviceKey": API_KEY,
+            "numOfRows": 300,
+            "pageNo": 1,
+        }, timeout=10)
+        items = resp.json()["response"]["body"]["items"]["item"]
+        countries = {}
+        for item in items:
+            name = item["country_nm"]
+            eng  = item["country_eng_nm"]
+            lvl  = item["alarm_lvl"]
+            countries[name] = {
+                "eng_name":    eng,
+                "iso":         item["country_iso_alp2"],
+                "level":       lvl,
+                "level_text":  ALARM_LEVEL_INFO.get(lvl, {}).get("text", "정보 없음"),
+                "level_color": ALARM_LEVEL_INFO.get(lvl, {}).get("color", "#999"),
+                "level_bg":    ALARM_LEVEL_INFO.get(lvl, {}).get("bg", "#f5f5f5"),
+                "level_icon":  ALARM_LEVEL_INFO.get(lvl, {}).get("icon", "⚪"),
+                "continent":   item["continent_nm"],
+                "region":      item["remark"],
+                "flag_url":    item["flag_download_url"],
+                "map_url":     item["map_download_url"],
+                "dang_map_url": item["dang_map_download_url"],
+            }
+        return countries
+    except Exception as e:
+        return {}
+
+# 도시 샘플 데이터 (바르셀로나)
+CITY_INFO = {"바르셀로나": {"overall": "높음", "overall_color": "#FF4B4B", "lat": 41.3870, "lng": 2.1700,
+    "districts": [
+        ("고딕 지구 (Barri Gòtic)", "매우 높음", "#CC0000", "소매치기·강도 최다 발생. 야간 특히 위험"),
+        ("람블라스 거리 (La Rambla)", "매우 높음", "#CC0000", "관광객 밀집, 소매치기 극심. 가방 앞으로"),
+        ("엘 라발 (El Raval)", "높음", "#FF4B4B", "야간 이동 위험, 강력범죄 주의"),
+        ("에이샴플라 (Eixample)", "보통", "#FFA500", "상대적으로 안전, 소매치기 주의"),
+        ("바르셀로네타 (Barceloneta)", "보통", "#FFA500", "해변 도난 주의, 귀중품 보관 철저"),
+        ("몬주이크 (Montjuïc)", "낮음", "#4CAF50", "비교적 안전, 야간 주의"),
+    ],
+    "tips": [
+        "💼 가방·지갑·핸드폰은 항상 앞으로 들고 이동하세요",
+        "🌙 엘 라발, 고딕 지구 야간 단독 이동 자제",
+        "📱 공공장소에서 스마트폰 노출 최소화",
+        "🏧 ATM 이용 시 주변을 반드시 확인하세요",
+        "🎒 배낭은 앞으로 메거나 잠금장치를 사용하세요",
+    ],
+}}
 
 CITY_INFO = {
     "바르셀로나": {
@@ -250,42 +297,85 @@ tab_a, tab_b, tab_c, tab_plan = st.tabs(
 
 with tab_a:
     st.subheader("① 국가 선택")
-    country = st.selectbox("국가", list(COUNTRY_INFO.keys()), label_visibility="collapsed")
-    info = COUNTRY_INFO[country]
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("경보 단계", f"{info['level']}단계")
-    c2.metric("경보 등급", info["level_text"])
-    c3.metric("여행 권고", "여행 가능 (주의)" if info["recommend"] else "여행 자제")
+    with st.spinner("외교부 여행경보 데이터 불러오는 중..."):
+        all_countries = fetch_all_countries()
 
-    st.markdown("**주요 위험 요인**")
-    for r in info["risks"]:
-        st.markdown(f"- {r}")
+    if not all_countries:
+        st.error("API 호출 실패. 잠시 후 다시 시도해주세요.")
+    else:
+        country_names = sorted(all_countries.keys())
+        default_idx = country_names.index("스페인") if "스페인" in country_names else 0
+        country = st.selectbox(
+            f"국가 선택 (전체 {len(country_names)}개국)",
+            country_names,
+            index=default_idx,
+            label_visibility="collapsed",
+        )
+        info = all_countries[country]
 
-    st.divider()
-    st.subheader("② 도시 선택")
-    city = st.selectbox("도시", info["cities"], label_visibility="collapsed")
+        # 경보 배지
+        st.markdown(
+            f"""
+            <div style="background:{info['level_bg']}; border:2px solid {info['level_color']};
+                        border-radius:12px; padding:18px 24px; margin:12px 0; display:flex; align-items:center; gap:20px;">
+                <img src="{info['flag_url']}" width="60" style="border-radius:4px;">
+                <div>
+                    <div style="font-size:22px; font-weight:bold;">{info['level_icon']} {country} ({info['eng_name']})</div>
+                    <div style="margin-top:6px; font-size:15px;">
+                        경보 <strong>{info['level']}단계</strong> —
+                        <span style="color:{info['level_color']}; font-weight:bold;">{info['level_text']}</span>
+                        &nbsp;|&nbsp; 대상 지역: {info['region']} &nbsp;|&nbsp; 대륙: {info['continent']}
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    if city in CITY_INFO:
-        cinfo = CITY_INFO[city]
-        with st.expander(f"⚠️ {city} 안전 브리핑 — 전체 위험도: **{cinfo['overall']}**", expanded=True):
-            st.markdown(
-                f"<span style='font-size:18px; font-weight:bold; color:{cinfo['overall_color']};'>"
-                f"전체 위험도: {cinfo['overall']}</span>",
-                unsafe_allow_html=True,
-            )
-            st.markdown("---")
-            st.markdown("**구역별 위험 수준**")
-            for name, level, color, detail in cinfo["districts"]:
-                dc1, dc2, dc3 = st.columns([3, 2, 4])
-                dc1.markdown(f"**{name}**")
-                dc2.markdown(f"<span style='color:{color}; font-weight:bold;'>{level}</span>", unsafe_allow_html=True)
-                dc3.markdown(detail)
+        # 경보 단계 설명
+        level_descs = {
+            "1": ["여행 시 신변 안전에 유의하세요.", "특별한 위험 요소는 없으나 기본적인 주의가 필요합니다."],
+            "2": ["불필요한 여행을 자제하세요.", "신변 안전에 특별히 주의하고 여행 목적을 최소화하세요."],
+            "3": ["즉시 출국을 검토하세요.", "체류 중인 경우 신속히 대피 준비를 하시기 바랍니다."],
+            "4": ["여행이 금지된 국가입니다.", "현지 체류자는 즉시 출국하시기 바랍니다."],
+        }
+        for desc in level_descs.get(info["level"], []):
+            st.warning(desc) if info["level"] in ("3","4") else st.info(desc)
 
-            st.markdown("---")
-            st.markdown("**여행 시 주의사항**")
-            for tip in cinfo["tips"]:
-                st.info(tip)
+        # 외교부 위험지도 이미지
+        with st.expander("📌 외교부 공식 위험지도 보기", expanded=False):
+            st.image(info["dang_map_url"], caption=f"{country} 외교부 공식 위험지도", use_container_width=True)
+
+        st.divider()
+        st.subheader("② 도시 선택 (바르셀로나 시범)")
+
+        # 도시는 스페인 선택 시에만 샘플 데이터 제공
+        if country == "스페인":
+            city = st.selectbox("도시", ["바르셀로나", "마드리드", "세비야", "발렌시아"], label_visibility="collapsed")
+        else:
+            city = st.selectbox("도시", ["(준비 중 — 현재 바르셀로나만 지원)"], label_visibility="collapsed")
+            city = None
+
+        if city and city in CITY_INFO:
+            cinfo = CITY_INFO[city]
+            with st.expander(f"⚠️ {city} 안전 브리핑 — 전체 위험도: **{cinfo['overall']}**", expanded=True):
+                st.markdown(
+                    f"<span style='font-size:18px; font-weight:bold; color:{cinfo['overall_color']};'>"
+                    f"전체 위험도: {cinfo['overall']}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown("---")
+                st.markdown("**구역별 위험 수준**")
+                for name, level, color, detail in cinfo["districts"]:
+                    dc1, dc2, dc3 = st.columns([3, 2, 4])
+                    dc1.markdown(f"**{name}**")
+                    dc2.markdown(f"<span style='color:{color}; font-weight:bold;'>{level}</span>", unsafe_allow_html=True)
+                    dc3.markdown(detail)
+                st.markdown("---")
+                st.markdown("**여행 시 주의사항**")
+                for tip in cinfo["tips"]:
+                    st.info(tip)
 
 # ===================== TAB B: 실시간 알림 =====================
 
