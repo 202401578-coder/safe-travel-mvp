@@ -448,24 +448,47 @@ def fetch_warning_detail(country_name):
         return None
 
 
+BLOCKED_SOURCES = {"네이트", "네이버 블로그", "티스토리", "카페", "위키백과",
+                   "나무위키", "Nate", "Blog", "Cafe", "Wikipedia"}
+
 @st.cache_data(ttl=600)
-def fetch_safety_news(country_name, country_eng):
+def fetch_safety_news(country_name, country_eng, city_name, city_eng):
     try:
-        query = f"{country_name} 여행 안전 사건 사고"
-        url = f"https://news.google.com/rss/search?q={quote(query)}&hl=ko&gl=KR&ceid=KR:ko"
+        # 도시명 기준으로 검색 (국가보다 구체적)
+        query = f"{city_eng} OR {city_name} safety crime incident warning"
+        url = f"https://news.google.com/rss/search?q={quote(query)}&hl=en&gl=US&ceid=US:en"
         feed = feedparser.parse(url)
+
         articles = []
-        for entry in feed.entries[:30]:
-            title = entry.get("title", "")
-            has_danger = any(kw in title for kw in DANGER_KW)
-            has_country = (country_name in title or country_eng in title)
-            if has_danger or has_country:
-                articles.append({
-                    "title":  title,
-                    "link":   entry.get("link", "#"),
-                    "pub":    entry.get("published", ""),
-                    "source": entry.get("source", {}).get("title", "뉴스"),
-                })
+        location_terms = {country_name.lower(), country_eng.lower(),
+                          city_name.lower(), city_eng.lower()}
+
+        for entry in feed.entries[:40]:
+            title   = entry.get("title", "")
+            source  = entry.get("source", {}).get("title", "")
+            title_l = title.lower()
+
+            # 신뢰도 낮은 출처 제외
+            if any(b.lower() in source.lower() for b in BLOCKED_SOURCES):
+                continue
+
+            # 도시 또는 국가 언급 필수
+            has_location = any(t in title_l for t in location_terms)
+            if not has_location:
+                continue
+
+            # 안전 관련 키워드 필수
+            has_danger = any(kw.lower() in title_l for kw in DANGER_KW)
+            if not has_danger:
+                continue
+
+            articles.append({
+                "title":  title,
+                "link":   entry.get("link", "#"),
+                "pub":    entry.get("published", ""),
+                "source": source or "뉴스",
+            })
+
         return articles[:10]
     except Exception:
         return []
@@ -702,12 +725,19 @@ with tab_b:
 
     st.markdown("---")
 
+    # 도시 영문명 조회
+    city_eng = ""
+    if sel_country in CITY_DB and sel_city in CITY_DB[sel_country]:
+        city_eng = CITY_DB[sel_country][sel_city].get("eng", sel_city)
+    else:
+        city_eng = sel_city
+
     # 실시간 뉴스
-    with st.spinner(f"{sel_country} 관련 안전 뉴스 수집 중..."):
-        news_items = fetch_safety_news(sel_country, sel_eng)
+    with st.spinner(f"{sel_city} 관련 안전 뉴스 수집 중..."):
+        news_items = fetch_safety_news(sel_country, sel_eng, sel_city, city_eng)
 
     if news_items:
-        st.markdown(f"**{sel_country} 관련 최신 안전 뉴스 ({len(news_items)}건)**")
+        st.markdown(f"**{sel_city} ({city_eng}) 관련 최신 안전 뉴스 ({len(news_items)}건)**")
         for i, article in enumerate(news_items):
             level_color = "#EF4444" if any(kw in article["title"] for kw in ["테러", "폭발", "총격", "사망", "attack", "terror", "shooting"]) \
                 else "#F97316" if any(kw in article["title"] for kw in ["사건", "사고", "범죄", "시위", "crime"]) \
